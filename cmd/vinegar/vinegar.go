@@ -56,7 +56,7 @@ func main() {
 				log.Fatal(err)
 			}
 		case "version":
-			fmt.Println("Vinegar", Version+"-diet")
+			fmt.Println("Vinegar", Version)
 		case "submit":
 			fmt.Println("There is no merlin, silly!!")
 		}
@@ -133,7 +133,7 @@ func Sysinfo(pfx *wine.Prefix) {
 * Kernel: %s
 * Wine: %s`
 
-	fmt.Printf(info, Version+"-diet", revision, sysinfo.Distro, sysinfo.CPU.Name, sysinfo.CPU.AVX, sysinfo.CPU.SplitLockDetect, sysinfo.Kernel, ver)
+	fmt.Printf(info, Version, revision, sysinfo.Distro, sysinfo.CPU.Name, sysinfo.CPU.AVX, sysinfo.CPU.SplitLockDetect, sysinfo.Kernel, ver)
 	if sysinfo.InFlatpak {
 		fmt.Println("* Flatpak: [x]")
 	}
