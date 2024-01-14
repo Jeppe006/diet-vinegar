@@ -32,7 +32,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: vinegar [-config filepath] player|studio [args...]")
 	fmt.Fprintln(os.Stderr, "       vinegar [-config filepath] exec prog args...")
 	fmt.Fprintln(os.Stderr, "       vinegar [-config filepath] kill|winetricks|sysinfo")
-	fmt.Fprintln(os.Stderr, "       vinegar delete|edit|submit|version")
+	fmt.Fprintln(os.Stderr, "       vinegar delete|edit|version")
 	os.Exit(1)
 }
 
@@ -55,12 +55,10 @@ func main() {
 			if err := editor.Edit(*configPath); err != nil {
 				log.Fatal(err)
 			}
-		case "submit":
-			if err := SubmitMerlin(); err != nil {
-				log.Fatal(err)
-			}
 		case "version":
 			fmt.Println("Vinegar", Version)
+		case "submit":
+			fmt.Println("There is no merlin, silly!!")
 		}
 	// These commands (except player & studio) don't require a configuration,
 	// but they require a wineprefix, hence wineroot of configuration is required.
