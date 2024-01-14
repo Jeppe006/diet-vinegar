@@ -33,7 +33,6 @@ const (
 	DialogReqChannel = "Roblox is attempting to set your channel to %[1]s, however the current preferred channel is %s.\n\nWould you like to set the channel to %[1]s temporarily?"
 	DialogNoWine     = "Wine is required to run Roblox on Linux, please install it appropiate to your distribution."
 	DialogNoAVX      = "Warning: Your CPU does not support AVX. While some people may be able to run without it, most are not able to. VinegarHQ cannot provide support for your installation. Continue?"
-	DialogMerlin     = `No merlin, silly 😜`
 )
 
 type Binary struct {
