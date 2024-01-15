@@ -63,6 +63,28 @@ func Edit(name string) error {
 	return nil
 }
 
+func EditNonToml(name string) error {
+	editor, err := Editor()
+	if err != nil {
+		return fmt.Errorf("editor: %w", err)
+	}
+
+	cmd := exec.Command(editor, name)
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return nil
+	}
+
+	return nil
+}
+
 func fillTemplate(name string) error {
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {

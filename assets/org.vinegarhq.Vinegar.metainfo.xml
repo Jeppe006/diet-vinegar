@@ -22,6 +22,15 @@
 			<caption>Vinegar gameplay of Phantom Forces, an experience on Roblox</caption>
 	  </screenshot>
 	</screenshots>
+		<releases>
+		<release version="1.6.1-diet" date="2024-1-15">
+			<description>
+				<ul>
+					<li>Added new log option, to show the latest log</li>
+				</ul>
+			</description>
+		</release>
+	</releases>
 	<releases>
 		<release version="1.6.0-diet" date="2024-1-15">
 			<description>

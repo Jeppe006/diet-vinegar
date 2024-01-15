@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,7 +33,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: vinegar [-config filepath] player|studio [args...]")
 	fmt.Fprintln(os.Stderr, "       vinegar [-config filepath] exec prog args...")
 	fmt.Fprintln(os.Stderr, "       vinegar [-config filepath] kill|winetricks|sysinfo")
-	fmt.Fprintln(os.Stderr, "       vinegar delete|edit|version")
+	fmt.Fprintln(os.Stderr, "       vinegar delete|edit|log|version")
 	os.Exit(1)
 }
 
@@ -47,7 +48,7 @@ func main() {
 
 	switch cmd {
 	// These commands don't require a configuration
-	case "delete", "edit", "submit", "version":
+	case "delete", "edit", "submit", "version", "log":
 		switch cmd {
 		case "delete":
 			Delete()
@@ -59,6 +60,8 @@ func main() {
 			fmt.Println("Vinegar", Version)
 		case "submit":
 			fmt.Println("There is no merlin, silly!!")
+		case "log":
+			OpenLog()
 		}
 	// These commands (except player & studio) don't require a configuration,
 	// but they require a wineprefix, hence wineroot of configuration is required.
@@ -106,6 +109,40 @@ func Delete() {
 	log.Println("Deleting Wineprefix")
 	if err := os.RemoveAll(dirs.Prefix); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func OpenLog() {
+	dir := filepath.Join(dirs.Logs)
+
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var birthTime time.Time
+	var names []string
+
+	for _, entry := range files {
+		fi, err := entry.Info()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if fi.Mode().IsRegular() && filepath.Ext(fi.Name()) == ".log" {
+			if !fi.ModTime().Before(birthTime) {
+				if fi.ModTime().After(birthTime) {
+					birthTime = fi.ModTime()
+					names = names[:0]
+				}
+				names = append(names, fi.Name())
+			}
+		}
+	}
+	if len(names) > 0 {
+		logFile := dir + "/" + strings.Join(names, "")
+		editor.EditNonToml(logFile)
+	} else {
+		fmt.Println("No log files found.")
 	}
 }
 
