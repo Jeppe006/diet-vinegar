@@ -23,6 +23,17 @@
 	  </screenshot>
 	</screenshots>
 	<releases>
+		<release version="1.6.0-diet" date="2024-1-15">
+			<description>
+				<ul>
+					<li>Removed Merlin 😜</li>
+					<li>Made progress bar pink, because why not</li>
+					<li>I love diet drinks (nothing new)</li>
+				</ul>
+			</description>
+		</release>
+	</releases>
+	<releases>
 		<release version="1.6.0" date="2023-12-22">
 			<description>
 				<ul>
