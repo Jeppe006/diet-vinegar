@@ -123,8 +123,8 @@ func Default() Config {
 			BgColor:     0x242424,
 			FgColor:     0xfafafa,
 			CancelColor: 0xbc3c3c,
-			TrackColor:  0x303030,
-			AccentColor: 0x8fbc5e,
+			TrackColor:  0x2b002e,
+			AccentColor: 0xbc5eb3,
 			InfoColor:   0x777777,
 		},
 	}
