@@ -7,6 +7,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/jaypipes/ghw"
 )
 
 const drmPath = "/sys/class/drm"
@@ -17,16 +19,20 @@ var embeddedDisplays = []string{"eDP", "LVDS"}
 
 func getCards() (cs []Card) {
 	drmCards, _ := filepath.Glob(path.Join(drmPath, "card[0-9]"))
+	gpu, _ := ghw.GPU()
 
-	for _, c := range drmCards {
+	for i, c := range drmCards {
 		dev, _ := filepath.EvalSymlinks(path.Join(c, "device"))
 		driver, _ := filepath.EvalSymlinks(path.Join(dev, "driver"))
 		driver = path.Base(driver)
+		name := gpu.GraphicsCards[i].DeviceInfo.Product.Name
 
 		cs = append(cs, Card{
+			Index:    i,
 			Path:     c,
 			Device:   dev,
 			Driver:   driver,
+			Name:     name,
 			Embedded: embedded(c),
 		})
 	}

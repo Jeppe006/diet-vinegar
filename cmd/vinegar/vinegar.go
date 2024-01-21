@@ -177,7 +177,7 @@ func Sysinfo(pfx *wine.Prefix) {
 
 	fmt.Println("* Cards:")
 	for i, c := range sysinfo.Cards {
-		fmt.Printf("  * Card %d: %s %s %s\n", i, c.Driver, path.Base(c.Device), c.Path)
+		fmt.Printf("  * Card %d: %s [%s %s %s]\n", i+1, c.Name, c.Driver, path.Base(c.Device), c.Path)
 	}
 }
 

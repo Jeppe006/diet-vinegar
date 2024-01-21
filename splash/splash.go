@@ -25,6 +25,7 @@ import (
 )
 
 //go:embed vinegar.png
+
 var vinegarLogo []byte
 
 var ErrClosed = errors.New("window closed")
