@@ -1,30 +1,33 @@
 package main
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
+	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/fsnotify/fsnotify"
+	"github.com/nxadm/tail"
 	bsrpc "github.com/vinegarhq/vinegar/bloxstraprpc"
 	"github.com/vinegarhq/vinegar/config"
 	"github.com/vinegarhq/vinegar/internal/bus"
-	"github.com/vinegarhq/vinegar/internal/dirs"
 	"github.com/vinegarhq/vinegar/internal/state"
 	"github.com/vinegarhq/vinegar/roblox"
 	boot "github.com/vinegarhq/vinegar/roblox/bootstrapper"
 	"github.com/vinegarhq/vinegar/splash"
+	"github.com/vinegarhq/vinegar/sysinfo"
 	"github.com/vinegarhq/vinegar/util"
 	"github.com/vinegarhq/vinegar/wine"
-	"github.com/vinegarhq/vinegar/wine/dxvk"
-	"golang.org/x/sync/errgroup"
 )
+
+const timeout = 6 * time.Second
 
 const (
 	DialogUseBrowser = "WebView/InternalBrowser is broken, please use the browser for the action that you were doing."
@@ -83,6 +86,116 @@ func NewBinary(bt roblox.BinaryType, cfg *config.Config, pfx *wine.Prefix) *Bina
 	}
 }
 
+func (b *Binary) Main(args ...string) {
+	b.Config.Env.Setenv()
+
+	logFile, err := LogFile(b.Type.String())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer logFile.Close()
+
+	logOutput := io.MultiWriter(logFile, os.Stderr)
+	b.Prefix.Output = logOutput
+	log.SetOutput(logOutput)
+
+	firstRun := false
+	if _, err := os.Stat(filepath.Join(b.Prefix.Dir(), "drive_c", "windows")); err != nil {
+		firstRun = true
+	}
+
+	if firstRun && !sysinfo.CPU.AVX {
+		c := b.Splash.Dialog(DialogNoAVX, true)
+		if !c {
+			log.Fatal("avx is (may be) required to run roblox")
+		}
+		log.Println("WARNING: Running roblox without AVX!")
+	}
+
+	if !wine.WineLook() {
+		b.Splash.Dialog(DialogNoWine, false)
+		log.Fatalf("%s is required to run roblox", wine.Wine)
+	}
+
+	go func() {
+		err := b.Splash.Run()
+		if errors.Is(splash.ErrClosed, err) {
+			log.Printf("Splash window closed!")
+
+			// Will tell Run() to immediately kill Roblox, as it handles INT/TERM.
+			// Otherwise, it will just with the same appropiate signal.
+			syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+			return
+		}
+
+		// The splash window didn't close cleanly (ErrClosed), an
+		// internal error occured.
+		if err != nil {
+			log.Fatalf("splash: %s", err)
+		}
+	}()
+
+	errHandler := func(err error) {
+		if !b.GlobalConfig.Splash.Enabled || b.Splash.IsClosed() {
+			log.Fatal(err)
+		}
+
+		log.Println(err)
+		b.Splash.LogPath = logFile.Name()
+		b.Splash.Invalidate()
+		b.Splash.Dialog(fmt.Sprintf(DialogFailure, err), false)
+		os.Exit(1)
+	}
+
+	// Technically this is 'initializing wineprefix', as SetDPI calls Wine which
+	// automatically create the Wineprefix.
+	if firstRun {
+		log.Printf("Initializing wineprefix at %s", b.Prefix.Dir())
+		b.Splash.SetMessage("Initializing wineprefix")
+
+		if err := b.Prefix.SetDPI(97); err != nil {
+			b.Splash.SetMessage(err.Error())
+			errHandler(err)
+		}
+	}
+
+	// If the launch uri contains a channel key with a value
+	// that isn't empty, Roblox requested a specific channel
+	func() {
+		if len(args) < 1 {
+			return
+		}
+
+		c := regexp.MustCompile(`channel:([^+]*)`).FindStringSubmatch(args[0])
+		if len(c) < 1 {
+			return
+		}
+
+		if c[1] != "" && c[1] != b.Config.Channel {
+			r := b.Splash.Dialog(
+				fmt.Sprintf(DialogReqChannel, c[1], b.Config.Channel),
+				true,
+			)
+			if r {
+				log.Println("Switching user channel temporarily to", c[1])
+				b.Config.Channel = c[1]
+			}
+		}
+	}()
+
+	b.Splash.SetDesc(b.Config.Channel)
+
+	if err := b.Setup(); err != nil {
+		b.Splash.SetMessage("Failed to setup Roblox")
+		errHandler(err)
+	}
+
+	if err := b.Run(args...); err != nil {
+		b.Splash.SetMessage("Failed to run Roblox")
+		errHandler(err)
+	}
+}
+
 func (b *Binary) Run(args ...string) error {
 	if b.Config.DiscordRPC {
 		if err := b.Activity.Connect(); err != nil {
@@ -93,14 +206,7 @@ func (b *Binary) Run(args ...string) error {
 		}
 	}
 
-	// REQUIRED for HandleRobloxLog to function.
-	os.Setenv("WINEDEBUG", os.Getenv("WINEDEBUG")+",warn+debugstr")
-
 	cmd, err := b.Command(args...)
-	if err != nil {
-		return err
-	}
-	o, err := cmd.OutputPipe()
 	if err != nil {
 		return err
 	}
@@ -124,291 +230,112 @@ func (b *Binary) Run(args ...string) error {
 		signal.Stop(c)
 	}()
 
-	go b.HandleOutput(o)
-
 	log.Printf("Launching %s (%s)", b.Name, cmd)
 	b.Splash.SetMessage("Launching " + b.Alias)
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("roblox process: %w", err)
-	}
-
-	if b.Config.GameMode {
-		if err := b.BusSession.GamemodeRegister(int32(cmd.Process.Pid)); err != nil {
-			log.Println("Attempted to register to Gamemode daemon")
+	go func() {
+		// Wait for process to start
+		for {
+			if cmd.Process != nil {
+				break
+			}
 		}
-	}
 
-	defer func() {
-		// may or may not prevent a race condition in procfs
-		syscall.Sync()
-
-		if util.CommFound("Roblox") {
-			log.Println("Another Roblox instance is already running, not killing wineprefix")
+		// If the log file wasn't found, assume failure
+		// and don't perform post-launch roblox functions.
+		lf, err := RobloxLogFile(b.Prefix)
+		if err != nil {
+			log.Println(err)
 			return
 		}
 
-		b.Prefix.Kill()
+		b.Splash.Close()
+
+		if b.Config.GameMode {
+			if err := b.BusSession.GamemodeRegister(int32(cmd.Process.Pid)); err != nil {
+				log.Println("Attempted to register to Gamemode daemon")
+			}
+		}
+
+		// Blocks and tails file forever until roblox is dead
+		if err := b.Tail(lf); err != nil {
+			log.Println(err)
+		}
 	}()
 
-	err = cmd.Wait()
-	if err == nil {
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(err.Error(), "signal:") {
+			log.Println("WARNING: Roblox exited with", err)
+			return nil
+		}
+
+		return fmt.Errorf("roblox process: %w", err)
+	}
+
+	// may or may not prevent a race condition in procfs
+	syscall.Sync()
+
+	if util.CommFound("Roblox") {
+		log.Println("Another Roblox instance is already running, not killing wineprefix")
 		return nil
 	}
 
-	// Roblox was sent a signal, do not consider it an error.
-	if strings.Contains(err.Error(), "signal:") {
-		log.Println("WARNING: Roblox exited with", err)
-		return nil
-	}
+	b.Prefix.Kill()
 
-	return fmt.Errorf("roblox: %w", err)
-}
-
-func (b *Binary) HandleOutput(wr io.Reader) {
-	s := bufio.NewScanner(wr)
-	closed := false
-
-	for s.Scan() {
-		txt := s.Text()
-
-		// XXXX:channel:class OutputDebugStringA "[FLog::Foo] Message"
-		if len(txt) >= 39 && txt[19:37] == "OutputDebugStringA" {
-			// As soon as a singular Roblox log has been hit, close the splash window
-			if !closed {
-				b.Splash.Close()
-			}
-
-			// length of roblox Flog message
-			if len(txt) >= 90 {
-				b.HandleRobloxLog(txt[39 : len(txt)-1])
-			}
-			continue
-		}
-
-		fmt.Fprintln(b.Prefix.Output, txt)
-	}
-}
-
-func (b *Binary) HandleRobloxLog(line string) {
-	fmt.Fprintln(b.Prefix.Output, line)
-
-	if strings.Contains(line, "DID_LOG_IN") {
-		b.Auth = true
-		return
-	}
-
-	if strings.Contains(line, "InternalBrowser") {
-		msg := DialogUseBrowser
-		if !b.Auth {
-			msg = DialogQuickLogin
-		}
-
-		b.Splash.Dialog(msg, false)
-		return
-	}
-
-	if b.Config.DiscordRPC {
-		if err := b.Activity.HandleRobloxLog(line); err != nil {
-			log.Printf("Failed to handle Discord RPC: %s", err)
-		}
-	}
-}
-
-func (b *Binary) FetchDeployment() error {
-	b.Splash.SetMessage("Fetching " + b.Alias)
-
-	if b.Config.ForcedVersion != "" {
-		log.Printf("WARNING: using forced version: %s", b.Config.ForcedVersion)
-
-		d := boot.NewDeployment(b.Type, b.Config.Channel, b.Config.ForcedVersion)
-		b.Deploy = &d
-		return nil
-	}
-
-	d, err := boot.FetchDeployment(b.Type, b.Config.Channel)
-	if err != nil {
-		return err
-	}
-
-	b.Deploy = &d
 	return nil
 }
 
-func (b *Binary) Setup() error {
-	s, err := state.Load()
+func RobloxLogFile(pfx *wine.Prefix) (string, error) {
+	ad, err := pfx.AppDataDir()
 	if err != nil {
-		return err
-	}
-	b.State = &s
-
-	if err := b.FetchDeployment(); err != nil {
-		return err
+		return "", err
 	}
 
-	b.Dir = filepath.Join(dirs.Versions, b.Deploy.GUID)
-	b.Splash.SetDesc(fmt.Sprintf("%s %s", b.Deploy.GUID, b.Deploy.Channel))
+	dir := filepath.Join(ad, "Local", "Roblox", "logs")
 
-	stateVer := b.State.Version(b.Type)
-	if stateVer != b.Deploy.GUID {
-		log.Printf("Installing %s (%s -> %s)", b.Name, stateVer, b.Deploy.GUID)
-
-		if err := b.Install(); err != nil {
-			return err
-		}
-	} else {
-		log.Printf("%s is up to date (%s)", b.Name, b.Deploy.GUID)
-	}
-
-	b.Config.Env.Setenv()
-
-	log.Println("Using Renderer:", b.Config.Renderer)
-	if err := b.Config.FFlags.Apply(b.Dir); err != nil {
-		return err
-	}
-
-	if err := dirs.OverlayDir(b.Dir); err != nil {
-		return err
-	}
-
-	if err := b.SetupDxvk(); err != nil {
-		return err
-	}
-
-	b.Splash.SetProgress(1.0)
-	return b.State.Save()
-}
-
-func (b *Binary) Install() error {
-	b.Splash.SetMessage("Installing " + b.Alias)
-
-	if err := dirs.Mkdirs(dirs.Downloads); err != nil {
-		return err
-	}
-
-	pm, err := boot.FetchPackageManifest(b.Deploy)
+	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		return "", err
+	}
+	defer w.Close()
+
+	if err := w.Add(dir); err != nil {
+		return "", err
 	}
 
-	if err := dirs.Mkdirs(dirs.Downloads); err != nil {
-		return err
-	}
+	t := time.NewTimer(timeout)
 
-	// Prioritize smaller files first, to have less pressure
-	// on network and extraction
-	//
-	// *Theoretically*, this should be better
-	sort.SliceStable(pm.Packages, func(i, j int) bool {
-		return pm.Packages[i].ZipSize < pm.Packages[j].ZipSize
-	})
-
-	b.Splash.SetMessage("Downloading " + b.Alias)
-	if err := b.DownloadPackages(&pm); err != nil {
-		return err
-	}
-
-	b.Splash.SetMessage("Extracting " + b.Alias)
-	if err := b.ExtractPackages(&pm); err != nil {
-		return err
-	}
-
-	if b.Type == roblox.Studio {
-		brokenFont := filepath.Join(b.Dir, "StudioFonts", "SourceSansPro-Black.ttf")
-
-		log.Printf("Removing broken font %s", brokenFont)
-		if err := os.RemoveAll(brokenFont); err != nil {
-			log.Printf("Failed to remove font: %s", err)
-		}
-	}
-
-	if err := boot.WriteAppSettings(b.Dir); err != nil {
-		return err
-	}
-
-	b.State.AddBinary(&pm)
-
-	if err := b.State.CleanPackages(); err != nil {
-		return err
-	}
-
-	return b.State.CleanVersions()
-}
-
-func (b *Binary) PerformPackages(pm *boot.PackageManifest, fn func(boot.Package) error) error {
-	donePkgs := 0
-	pkgsLen := len(pm.Packages)
-	eg := new(errgroup.Group)
-
-	for _, p := range pm.Packages {
-		p := p
-		eg.Go(func() error {
-			err := fn(p)
-			if err != nil {
-				return err
+	for {
+		select {
+		case <-t.C:
+			return "", fmt.Errorf("roblox log file not found after %s", timeout)
+		case e := <-w.Events:
+			if e.Has(fsnotify.Create) {
+				return e.Name, nil
 			}
-
-			donePkgs++
-			b.Splash.SetProgress(float32(donePkgs) / float32(pkgsLen))
-
-			return nil
-		})
-	}
-
-	return eg.Wait()
-}
-
-func (b *Binary) DownloadPackages(pm *boot.PackageManifest) error {
-	log.Printf("Downloading %d Packages for %s", len(pm.Packages), pm.Deployment.GUID)
-
-	return b.PerformPackages(pm, func(pkg boot.Package) error {
-		return pkg.Download(filepath.Join(dirs.Downloads, pkg.Checksum), pm.DeployURL)
-	})
-}
-
-func (b *Binary) ExtractPackages(pm *boot.PackageManifest) error {
-	log.Printf("Extracting %d Packages for %s", len(pm.Packages), pm.Deployment.GUID)
-
-	pkgDirs := boot.BinaryDirectories(b.Type)
-
-	return b.PerformPackages(pm, func(pkg boot.Package) error {
-		dest, ok := pkgDirs[pkg.Name]
-
-		if !ok {
-			return fmt.Errorf("unhandled package: %s", pkg.Name)
+		case err := <-w.Errors:
+			log.Println("fsnotify watcher:", err)
 		}
-
-		return pkg.Extract(filepath.Join(dirs.Downloads, pkg.Checksum), filepath.Join(b.Dir, dest))
-	})
+	}
 }
 
-func (b *Binary) SetupDxvk() error {
-	if b.State.DxvkVersion != "" && !b.GlobalConfig.Player.Dxvk && !b.GlobalConfig.Studio.Dxvk {
-		b.Splash.SetMessage("Uninstalling DXVK")
-		if err := dxvk.Remove(b.Prefix); err != nil {
-			return err
+func (b *Binary) Tail(name string) error {
+	t, err := tail.TailFile(name, tail.Config{Follow: true})
+	if err != nil {
+		return err
+	}
+
+	for line := range t.Lines {
+		fmt.Fprintln(b.Prefix.Output, line.Text)
+
+		if b.Config.DiscordRPC {
+			if err := b.Activity.HandleRobloxLog(line.Text); err != nil {
+				log.Printf("Failed to handle Discord RPC: %s", err)
+			}
 		}
-
-		b.State.DxvkVersion = ""
-		return nil
 	}
 
-	if !b.Config.Dxvk {
-		return nil
-	}
-
-	b.Splash.SetProgress(0.0)
-	dxvk.Setenv()
-
-	if b.GlobalConfig.DxvkVersion == b.State.DxvkVersion {
-		return nil
-	}
-
-	// This would only get saved if Install succeeded
-	b.State.DxvkVersion = b.GlobalConfig.DxvkVersion
-
-	b.Splash.SetMessage("Installing DXVK")
-	return dxvk.Install(b.GlobalConfig.DxvkVersion, b.Prefix)
+	return nil
 }
 
 func (b *Binary) Command(args ...string) (*wine.Cmd, error) {

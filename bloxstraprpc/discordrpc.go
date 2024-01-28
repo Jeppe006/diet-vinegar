@@ -2,15 +2,10 @@ package bloxstraprpc
 
 import (
 	"log"
-	"strconv"
-	"time"
 
 	"github.com/altfoxie/drpc"
 	"github.com/vinegarhq/vinegar/roblox/api"
 )
-
-// This is Bloxstrap's Discord RPC application ID.
-const RPCAppID = "1005469189907173486"
 
 func (a *Activity) Connect() error {
 	log.Println("Connecting to Discord RPC")
@@ -24,112 +19,81 @@ func (a *Activity) Close() error {
 	return a.client.Close()
 }
 
-func (a *Activity) SetCurrentGame() error {
-	if err := a.SetPresence(); err != nil {
-		return err
+func (a *Activity) UpdateGamePresence(initial bool) error {
+	if a.universeID == "" {
+		log.Println("Not in game, clearing presence!")
+
+		return a.client.SetActivity(a.presence)
 	}
 
-	return a.UpdatePresence()
-}
-
-func (a *Activity) SetPresence() error {
-	var status string
-
-	gd, err := api.GetGameDetails(a.universeID)
-	if err != nil {
-		return err
-	}
-	log.Println("Got Game details")
-
-	tn, err := api.GetGameIcon(a.universeID, "PlaceHolder", "512x512", "Png", false)
-	if err != nil {
-		return err
-	}
-	log.Printf("Got Universe thumbnail as %s", tn.ImageURL)
-
-	buttons := []drpc.Button{{
+	a.presence.Buttons = []drpc.Button{{
 		Label: "See game page",
 		URL:   "https://www.roblox.com/games/" + a.placeID,
 	}}
 
-	joinurl := "roblox://experiences/start?placeId=" + a.placeID + "&gameInstanceId=" + a.jobID
-	switch a.server {
-	case Public:
-		status = "by " + gd.Creator.Name
-		buttons = append(buttons, drpc.Button{
+	if a.server == Public {
+		joinurl := "roblox://experiences/start?placeId=" + a.placeID + "&gameInstanceId=" + a.jobID
+		a.presence.Buttons = append(a.presence.Buttons, drpc.Button{
 			Label: "Join server",
 			URL:   joinurl,
 		})
-	case Private:
-		status = "In a private server"
-	case Reserved:
-		status = "In a reserved server"
 	}
 
-	a.presence = drpc.Activity{
-		State:   status,
-		Details: "Playing " + gd.Name,
-		Assets: &drpc.Assets{
-			LargeImage: tn.ImageURL,
-			LargeText:  gd.Name,
-			SmallImage: "roblox",
-			SmallText:  "Roblox",
-		},
-		Timestamps: &drpc.Timestamps{
+	if a.presence.Assets == nil {
+		a.presence.Assets = new(drpc.Assets)
+	}
+
+	if initial || (a.presence.Details == Reset ||
+		a.presence.State == Reset ||
+		a.presence.Assets.LargeText == Reset) {
+		gd, err := api.GetGameDetails(a.universeID)
+		if err != nil {
+			return err
+		}
+
+		if initial || a.presence.Details == Reset {
+			a.presence.Details = "Playing " + gd.Name
+		}
+
+		if initial || a.presence.State == Reset {
+			a.presence.State = "by " + gd.Creator.Name
+
+			switch a.server {
+			case Private:
+				a.presence.State = "In a private server"
+			case Reserved:
+				a.presence.State = "In a reserved server"
+			}
+		}
+
+		if initial || a.presence.Assets.LargeText == Reset {
+			a.presence.Assets.LargeText = gd.Name
+		}
+	}
+
+	if initial || a.presence.Assets.LargeImage == Reset {
+		tn, err := api.GetGameIcon(a.universeID, "PlaceHolder", "512x512", "Png", false)
+		if err != nil {
+			return err
+		}
+
+		a.presence.Assets.LargeImage = tn.ImageURL
+	}
+
+	if initial || a.presence.Assets.SmallImage == Reset {
+		a.presence.Assets.SmallImage = "roblox"
+	}
+
+	if initial || a.presence.Assets.SmallText == Reset {
+		a.presence.Assets.SmallText = "Roblox"
+	}
+
+	if a.presence.Timestamps == nil {
+		a.presence.Timestamps = &drpc.Timestamps{
 			Start: a.gameTime,
-		},
-		Buttons: buttons,
-	}
-
-	return nil
-}
-
-func (a *Activity) ProcessMessage(m *Message) {
-	if m.Command != "SetRichPresence" {
-		return
-	}
-
-	if m.Data.Details != "" {
-		a.presence.Details = m.Data.Details
-	}
-
-	if m.Data.State != "" {
-		a.presence.State = m.Data.State
-	}
-
-	if a.presence.Timestamps != nil {
-		if m.TimestampStart == 0 {
-			a.presence.Timestamps = nil
-		} else {
-			a.presence.Timestamps.Start = time.UnixMilli(m.TimestampStart)
-		}
-		if m.TimestampEnd == 0 {
-			a.presence.Timestamps = nil
-		} else {
-			a.presence.Timestamps.End = time.UnixMilli(m.TimestampEnd)
 		}
 	}
 
-	if m.SmallImage.Clear {
-		a.presence.Assets.SmallImage = ""
-	}
-
-	if m.SmallImage.AssetID != 0 {
-		a.presence.Assets.SmallImage = "https://assetdelivery.roblox.com/v1/asset/?id" +
-			strconv.FormatInt(m.SmallImage.AssetID, 10)
-	}
-
-	if m.LargeImage.Clear {
-		a.presence.Assets.LargeImage = ""
-	}
-
-	if m.LargeImage.AssetID != 0 {
-		a.presence.Assets.LargeImage = "https://assetdelivery.roblox.com/v1/asset/?id" +
-			strconv.FormatInt(m.LargeImage.AssetID, 10)
-	}
-}
-
-func (a *Activity) UpdatePresence() error {
-	log.Printf("Updating presence: %+v", a.presence)
+	log.Printf("Updating Discord presence: %#v", a.presence)
 	return a.client.SetActivity(a.presence)
 }
